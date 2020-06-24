@@ -1,236 +1,284 @@
 import sys
 import math
  
-# Vector Class to handle all vectorial operations
-class Vector():
+# Outputs the relative angle between a pod and a specified target: (-180, 180)
+def getAngle(pod, target):
+    rangle = math.radians(pod.angle)
+    dvector = Vector(math.cos(rangle), math.sin(rangle))
+    pvector = target.sub(pod.position)
+    cangle = dvector.dot(pvector)/pvector.mag(False)
+    direction = dvector.cross(pvector)
+    result = round(math.degrees(math.acos(cangle)))
+    return result if direction >= 0 else -result
  
-    # Initialize a vector with its x-y coordinates in the game world
+# Simulates a turn for a given pod
+def simulate(pod):
+    sid = pod.id
+    checkpoint = pod.path[sid]
+    angle = math.radians(pod.angle)
+    dvector = Vector(math.cos(angle), math.sin(angle))
+    thrust = dvector.mul(650) if pod.thrust() == "BOOST" else dvector.mul(pod.thrust())
+    offset = pod.velocity.add(thrust).mul(2.3)
+    if pod.position.sub(pod.velocity.add(thrust)).sub(checkpoint).mag() < 10**6:
+        try:
+            checkpoint = pod.path[sid+1]
+        except IndexError:
+            checkpoint = pod.path[0]
+        
+        if abs(getAngle(pod, checkpoint)) >= 90:
+            offset = pod.velocity.add(thrust).mul(5)
+        else:
+            offset = pod.velocity.mul(5)
+    
+    pcdist = pod.position.sub(pod.path[sid-1]).mag()
+    ccdist = pod.position.sub(pod.path[sid]).mag()
+    if (pcdist < 10**6 and thrust.mag() < 1600) or (ccdist < 10**6):
+        if abs(getAngle(pod, checkpoint)) >= 90:
+            offset = pod.velocity.add(thrust).mul(12)
+        else:
+            offset = pod.path[pod.id].sub(checkpoint).mul(0.5)
+ 
+    target = checkpoint.sub(offset)
+    angle = getAngle(pod, target)
+    rotation = angle if abs(angle) <= 18 else 18*angle/abs(angle) 
+    dangle = (pod.angle + rotation)%360
+    
+    path = Path()
+    path.path = pod.path
+    spod = Pod(pod.position.get(), pod.velocity.get(), angle, sid, path)
+    
+    dvector = Vector(math.cos(math.radians(dangle)),math.sin(math.radians(dangle)))
+    try:
+        avector = dvector.mul(spod.thrust())
+    except TypeError:
+        avector = dvector.mul(650) if pod.thrust() == "BOOST" else Vector(0,0)
+    vvector = Vector(*list(map(round, pod.velocity.add(avector).get())))
+    pvector = Vector(*list(map(round, pod.position.add(vvector).get())))
+ 
+    if pvector.sub(checkpoint).mag() < 360000:
+        try:
+            sid += 1
+            checkpoint = spod.path[sid]
+        except IndexError:
+            sid = 0
+ 
+    return Pod(pvector.get(), vvector.get(), dangle, sid, path), avector
+ 
+# Vector class to compute math operations
+class Vector():
     def __init__(self, x, y):
         self.x = x
         self.y = y
  
-    def vector(self):
-        return (self.x, self.y)
+    # returns a list of the x-y components of the vector
+    def get(self):
+        return [self.x, self.y]
  
-    # Outputs the magnitude of the vector or the distance between two vectors
-    def mag(self, vector=None, sq=True):
-        vector = Vector(0, 0) if vector == None else vector
-        result = sum((i - j)**2 for i, j in zip(self.vector(), vector.vector()))
-        return result if sq else math.sqrt(result) 
-    
-    # Outputs the resultant vector of the vector addition of two vectors
+    # returns the resultant vector of the vector addition of two vectors
     def add(self, vector):
-        return Vector(*[math.floor(i+j) for i, j in zip(self.vector(), vector.vector())])
+        return Vector(*[i+j for i, j in zip(self.get(), vector.get())])
  
-    # Outputs the resultant vector of the vector subtraction of two vectors
+    # returns the resultant vector of the vector subtraction of two vectors
     def sub(self, vector):
-        return Vector(*[i-j for i, j in zip(vector.vector(), self.vector())])
+        return Vector(*[i-j for i, j in zip(self.get(), vector.get())])
  
-    def mul(self, scalar):
-        return Vector(int(self.x*scalar), self.y*scalar)
-    
-    # Outputs the dot product of two vectors
+    # returns the dot product of two vectors
     def dot(self, vector):
-        return sum(i*j for i, j in zip(self.vector(), vector.vector()))
+        return sum(i*j for i, j in zip(self.get(), vector.get()))
  
-    # Outputs the cross product of two vectors
-    def cros(self, vector):
-        return self.x*vector.y - self.y*vector.x
+    # returns the cross product of two vectors
+    def cross(self, vector):
+        return self.x*vector.y - vector.x*self.y
  
-# Path class to track the position of each checkpoint
+    # returns the scalar multiple the vector
+    def mul(self, scalar):
+        return Vector(round(self.x*scalar), round(self.y*scalar))
+ 
+    # returns the magnitude of the vector
+    def mag(self, sq=True):
+        magnitude = self.x**2 + self.y**2
+        return magnitude if sq else math.sqrt(magnitude)
+ 
+# Path class to store all the checkpoints data
 class Path():
- 
-    # Initialize a list to store all checkpoints
     def __init__(self):
         self.path = []
-    
-    # Add a new checkpoint to the list
-    def push(self, node):
-        self.path.append(node)
  
-    # Outputs the current list of stored checkpoints
+    # pushes a new checkpoint to the list
+    def push(self, node):
+        self.path.append(Vector(*node))
+ 
+    # returns a list of all checkpoints
     def get(self):
         return self.path
  
-# Pod class to handle all the player behaviours
+# Pod class to store all data on each pod
 class Pod():
- 
-    # Initialize all information on the current state of the pod
-    def __init__(self, position, velocity, angle, id, path, cooldown=0, boosted=None, check=0):
+    def __init__(self, position, velocity, angle, checkid, path):
         self.position = Vector(*position)
         self.velocity = Vector(*velocity)
         self.angle = angle
-        self.id = id
+        self.id = checkid
         self.path = path.get()
-        self.boosted = boosted
  
-        # States whether the pod is in an inoperable state
-        self.inoperable = False
-        self.checks = check
-        self.cooldown = cooldown
+        self.acc = 0
+        self.nboosted = True
+        self.shieldcd = 0
+        self.checks = 0
+        self.type = None
  
-    # returns the relative angle between the pod and a target: (-180, 180)
-    def rangle(self, target=None, sign=False):
-        target = self.path[self.id] if target == None else target
-        radangle = math.radians(self.angle)
-        uvector = Vector(math.cos(radangle), math.sin(radangle))
-        pvector = self.position.sub(target)
-        cosine = uvector.dot(pvector)/pvector.mag(sq=False)
-        direction = uvector.cros(pvector)
-        result = math.degrees(math.acos(cosine))
-        result = result if not sign else result/abs(result)
-        
-        return result if direction >= 0 else -result
- 
-    # computes and returns the thrust value for the pod
-    def thrust(self, epods, inoperable=None):
-        thrust = 100
-        bindex = None
-        dmax = 0
-        boost = False
-        inoperable = self.inoperable if inoperable == None else inoperable
- 
-        # update the pod's checkpoint if its in close range with the curent target
-        for i in range(len(self.path)):
-            try:
-                if self.path[i].mag(self.path[i+1]) >= dmax:
-                    dmax = self.path[i].mag(self.path[i+1])
-                    bindex = i+1
-            except IndexError:
-                if self.path[i].mag(self.path[0]) >= dmax:
-                    bindex = 0
-        
-        # boost the pod if the conditions are met and it hasn't been boosted prior
-        if not self.boosted and self.id == bindex and abs(self.rangle()) <= 3 and self.cooldown == 0:
-            boost = True
-            thrust = "BOOST"
-        else:
-            boost = False
- 
-        # variate the thrust value in accordance with its angle and proximity in relation with its target
-        if abs(self.rangle()) <= 90:
-            allign = max(min((1 - abs(self.rangle())/90), 1), 0)
-            proximity = max(min(self.path[self.id].mag(self.position)/1440000, 1), 0)
-            thrust = math.floor(100 * allign * proximity)
-        else:
-            thrust = 0
- 
-        thrust = 100 if inoperable else thrust
- 
-        # simluate a turn to know the pods information a turn in advance to take the appropriate action
-        for pod in epods.values():
-            uangle = self.rangle() if self.rangle() < 18 else 18*self.rangle(sign=True)
-            udangle = math.radians(self.angle + uangle)
-            udvector = Vector(math.cos(udangle), math.sin(udangle))
-            try:
-                uavector = udvector.mul(thrust)
-            except TypeError:
-                uavector = udvector.mul(650) if thrust == "BOOST" else udvector.mul(0)
-            uvvector = self.velocity.mul(0.85).add(uavector)
-            upvector = self.position.add(uvvector)
- 
-            eangle = pod.rangle() if pod.rangle() < 18 else 18*pod.rangle(sign=True)
-            edangle = math.radians(pod.angle + eangle)
-            edvector = Vector(math.cos(edangle), math.sin(edangle))
-            eavector = edvector.mul(100) if thrust != "BOOST" else edvector.mul(650)
-            evvector = pod.velocity.mul(0.85).add(eavector)
-            epvector = pod.position.add(evvector)
- 
-            angle = self.rangle(target=pod.position) - self.rangle()
- 
-            # shield the pod if it collides with enemy pod and its trajectory is hindered
-            if upvector.mag(vector=epvector) <= 640000 and abs(angle) <= 90:
-                self.cooldown = 4
-                thrust = "SHIELD"
- 
-        return "BOOST" if boost else thrust
- 
-    # computes and returns the target value for the pod to move towards
-    def target(self, epods):
-
-        # simulate a turn to take appropriate action for the pod in advance
+    # returns a target vector for the pod
+    def target(self):
         checkpoint = self.path[self.id]
-        offset = self.velocity.mul(3)   
-        angle = self.rangle(target=checkpoint) if self.rangle(target=checkpoint) < 18 else 18*self.rangle(target=checkpoint, sign=True)
-        dangle = math.radians(self.angle + angle)
-        dvector = Vector(math.cos(dangle), math.sin(dangle))
-        try:
-            avector = dvector.mul(self.thrust(epods))
-        except TypeError:
-            avector = dvector.mul(650) if self.thrust(epods) == "BOOST" else dvector.mul(0)
-        vvector = self.velocity.mul(0.85).add(avector)
-        pvector = self.position.add(vvector)
-        
-        if checkpoint.mag(vector=pvector) <= 4*10**6:
+        spod, thrust = simulate(self)
+        offset = self.velocity.add(thrust).mul(2.3)
+ 
+        if spod.position.add(offset).sub(checkpoint).mag() < 10**6:
             try:
                 checkpoint = self.path[self.id+1]
             except IndexError:
-                checkpoint = self.path[0]    
- 
-            angle = self.rangle(target=checkpoint) if self.rangle(target=checkpoint) < 18 else 18*self.rangle(target=checkpoint, sign=True)
-            dangle = math.radians(self.angle + angle)
-            dvector = Vector(math.cos(dangle), math.sin(dangle))
-            try:
-                avector = dvector.mul(self.thrust(epods))
-            except TypeError:
-                avector = dvector.mul(650) if self.thrust(epods) == "BOOST" else dvector.mul(0)
-            vvector = self.velocity.mul(0.85).add(avector)
-            pvector = self.position.add(vvector)
-            offset = vvector.mul(3)
- 
-            # revert the checkpoint to previous one if pod becomes immovable
-            if pvector.add(vvector.mul(2)).mag(vector=self.path[self.id]) > 3600:
-                checkpoint = self.path[self.id]
-                if self.thrust(epods) == 0:
-                    self.inoperable = True
+                checkpoint = self.path[0]
             
-        # return a value with a calculated offset with respect to the current checkpoint.
-        return offset.sub(checkpoint)
+            if abs(getAngle(spod, checkpoint)) >= 90:
+                offset = spod.velocity.add(thrust).mul(5)
+            else:
+                offset = spod.velocity.mul(5)
+ 
+        pcdist = spod.position.sub(spod.path[spod.id-1]).mag()
+        ccdist = spod.position.sub(spod.path[spod.id]).mag()
+        if (pcdist < 10**6 and thrust.mag() < 1600) or (ccdist < 10**6):
+            spod, thrust = simulate(spod)
+            
+            if abs(getAngle(spod, checkpoint)) >= 90:
+                offset = spod.velocity.add(thrust).mul(12)
+            else:
+                offset = self.path[self.id].sub(spod.position).mul(0.5)
+        
+        return checkpoint.sub(offset)
+ 
+    # returns whether the pod is to be boosted or not
+    def getboost(self):
+        dmax = 0
+        index = 0
+        nboost = self.nboosted
+        target = self.path[self.id]
+        for i in range(len(self.path)):
+            try:
+                if self.path[i].sub(self.path[i+1]).mag() >= dmax:
+                    dmax = self.path[i].sub(self.path[i+1]).mag()
+                    index = i+1
+            except IndexError:
+                if self.path[i].sub(self.path[0]).mag() >= dmax:
+                    dmax = self.path[i].sub(self.path[0]).mag()
+                    index = 0
+                    
+        if self.shieldcd == 0 and self.id == index and nboost and abs(getAngle(self, target)) <= 3:
+            return True
+        else:
+            return False
+ 
+    # returns a thrust value for the pod 
+    def thrust(self, epods=None):
+        maxthrust = 100
+        thrust = 100
+        target = self.path[self.id]
+        if self.type != "racer" and epods != None:
+            target = epods[0] if epods[0].checks >= epods[1].checks else epods[1]
+            target = target.target()
+        proximity = min(1, target.sub(self.position).mag()/4000000)
+        allignment = min(1, max(0, 1 - abs(getAngle(self, target)/90)))
+        
+        if abs(getAngle(self, target)) <= 10:
+            thrust = math.floor(maxthrust * max(0.4, proximity))
+        else:
+            thrust =  math.floor(maxthrust*proximity*allignment)
+ 
+        return "BOOST" if self.getboost() else thrust
+ 
+    # returns whether the pod is to be shielded or not
+    def getshield(self, epods):
+        for pod in epods.values():
+            uposition = self.position.add(self.velocity.mul(2))
+            eposition = pod.position.add(pod.velocity.mul(2))
+ 
+            tvector = self.path[self.id].sub(self.position)
+            pvector = pod.position.sub(self.position)
+            angle = tvector.dot(pvector)/(tvector.mag(sq=False)*pvector.mag(sq=False))
+            dist = uposition.sub(eposition).mag()
+ 
+            if dist <= 640000 and angle <= 90:
+                self.shieldcd = 4
+                return True
+            else:
+                return False
+ 
+    def intercept(self, epods):
+        target = epods[0] if epods[0].checks >= epods[1].checks else epods[1]
+        target, thrust = simulate(target)
+ 
+        tdist = target.position.sub(self.position).mag()
+        cdist = self.position.sub(target.path[target.id]).mag()
+ 
+        if tdist < cdist:
+            return target.position
+        else:
+            return target.path[target.id]
  
 path = Path()
 upods = {}
 epods = {}
  
-boosted = [False, False]
-checks = [0, 0, 0, 0]
+nboosted = [True, True]
 cooldown = [0, 0]
-inoperables = [False, False]
+checks = [0, 0, 0, 0]
  
 laps = int(input())
 checkpoint_count = int(input())
  
 for i in range(checkpoint_count):
     checkpoint_x, checkpoint_y = [int(j) for j in input().split()]
-    path.push(node=Vector(checkpoint_x, checkpoint_y))
+    path.push([checkpoint_x, checkpoint_y])
  
 # game loop
 while True:
     for i in range(2):
-        x, y, vx, vy, angle, next_check_point_id = [int(j) for j in input().split()]
-        
+        x, y, vx, vy, angle, check_point_id = [int(j) for j in input().split()]
         try:
-            if upods[i].id != next_check_point_id:
-                upods[i].inoperable = False
-                checks[i] += 1 
-            boosted[i] = upods[i].boosted
-            cooldown[i] = max(upods[i].cooldown - 1, 0)
-            inoperables[i] = upods[i].inoperable
+            checks[i] += 1 if upods[i].id != check_point_id else 0
         except KeyError:
             checks[i] = 0
-            boosted[i] = False
-            cooldown[i] = 0
-            inoperables[i] = False
  
-        upods[i] = Pod(position=(x, y), velocity=(vx, vy), angle=angle, id=next_check_point_id, path=path, cooldown=cooldown[i], boosted=boosted[i], check=checks[i])
-        upods[i].inoperable = inoperables[i]
+        upods[i] = Pod([x,y], [vx,vy], angle, check_point_id, path)
+        upods[i].nboosted = nboosted[i]
+        upods[i].shieldcd = max(cooldown[i]-1, 0)
+        upods[i].checks = checks[i]
+ 
     for i in range(2):
-        x_2, y_2, vx_2, vy_2, angle_2, next_check_point_id_2 = [int(j) for j in input().split()]
+        x_2, y_2, vx_2, vy_2, angle_2, check_point_id_2 = [int(j) for j in input().split()]
         try:
-            checks[i+2] += 1 if epods[i].id != next_check_point_id_2 else 0
+            checks[i+2] += 1 if epods[i].id != check_point_id_2 else 0
         except KeyError:
             checks[i+2] = 0
  
-        epods[i] = Pod(position=(x_2, y_2), velocity=(vx_2, vy_2), angle=angle_2, id=next_check_point_id_2, path=path, check=checks[i+2])
+        epods[i] = Pod([x_2, y_2], [vx_2, vy_2], angle_2, check_point_id_2, path)
+        epods[i].checks = checks[i+2]
+    # To debug: print("Debug messages...", file=sys.stderr)
+    if upods[0].checks > upods[1].checks:
+        upods[0].type = "racer"
+        upods[1].type = "interceptor"
+    else:
+        upods[1].type = "racer"
+        upods[0].type = "interceptor"
  
+    i = 0
     for pod in upods.values():
-        print(f"{pod.target(epods).x} {pod.target(epods).y} {pod.thrust(epods)}")
+        if pod.type == "racer":
+            pod.acc = "SHIELD" if pod.getshield(epods) else pod.thrust(epods)
+            print(pod.target().x, pod.target().y, pod.acc)
+        else:
+            pod.acc = pod.thrust(epods)
+            print(pod.intercept(epods).x, pod.intercept(epods).y, pod.acc)
+ 
+        nboosted[i] = False if pod.thrust() == "BOOST" else nboosted[i]
+        cooldown[i] = pod.shieldcd
+        i += 1
