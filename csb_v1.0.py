@@ -1,191 +1,138 @@
 import sys
 import math
-
-# returns the distance between two points 
+ 
+# Outputs the distance between two points
 def distance(a, b):
-    return math.sqrt((b[1]-a[1])**2 + (b[0]-a[0])**2)
+    return math.sqrt(sum((i - j)**2 for i, j in zip(a, b)))
  
-# returns whether to use the boost or not
-def boost(checkpoint, checkpoints, angle):
-    dist = 0
-    index = 0
-    for i in range(len(checkpoints)):
-        try:
-            if distance(checkpoints[i+1], checkpoints[i]) > dist:
-                dist = distance(checkpoints[i+1], checkpoints[i])
-                index = i + 1
-        except IndexError:
-            if distance(checkpoints[-1], checkpoints[0]) > dist:
-                index = -1
-    if checkpoint == checkpoints[index] and angle <= 5:
-        return True
-    else:
-        return False
+# Outputs the dot product of two vectors
+def dot(a, b):
+    return sum(i*j for i, j in zip(a, b))
  
-# computes the thrust for the pod
-def thrust(checkpoints, angle, cid, x, y, thrust, ptype):
-    if ptype == "racer":     
-        if angle < 90:
-            if boost(checkpoints[cid], checkpoints, angle) and thrust != "SHIELD":
-                return "BOOST"
-            else:
-                return 100
-        elif angle >= 90:
-            allign = max(min((1 - angle/90), 1), 0)
-            proximity = max(min(distance(checkpoints[cid], [x, y])/1000, 1), 0)
-            return 100 * math.floor(allign * proximity)
-    elif ptype == "pseudoracer":
-        if angle >= 90:
-            allign = max(min((1 - angle/90), 1), 0)
-            proximity = max(min(distance(checkpoints[cid], [x, y])/1000, 1), 0)
-            if distance(checkpoints[cid], [x, y]) <= 1000:    
-                return 100 * math.floor(allign * proximity)
-            else:
-                return 100 * math.floor(allign)
-        elif distance(checkpoints[cid], [x, y]) <= 400:
-            return "SHIELD"
-        else:
-            return 100
-    else:
-        chaser = cid
-        if distance([chaser.x, chaser.y], [x, y]) <= 900:
-            return "SHIELD"
-        elif distance([chaser.x, chaser.y], [x, y]) > 900 and angle > 180:
-            allign = max(min((1 - angle/90), 1), 0.5)
-            proximity = max(min(distance([chaser.x, chaser.y], [x, y])/800, 1), 0.5)
-            return 100 * math.floor(allign * proximity)
-        else:
-            return "BOOST"
-        
-# Pod class to store all of a pods data
+# Pod class to store information on each pod
 class Pod():
-    def __init__(self, x, y, vx, vy, angle, checkid):
-        self.x = x
-        self.y = y
-        self.vx = vx
-        self.vy = vy
+    def __init__(self, position, velocity, angle, targetid, path, boosted):
+        self.position = position
+        self.velocity = velocity
         self.angle = angle
-        self.checkid = checkid
-        self.relative = None
-        self.targets = None
-        self.thrust = 100
-        self.type = None
-        self.lap = 0
-        self.chaser = None
+        self.targetid = targetid
+        self.path = path.get()
+        self.stuck = False
+        self.boosted = boosted
  
-    # returns the relative angle between a pod and the next checkpoint: (0, 180)
-    def relativeangle(self, checkpoint):
-        d = distance([self.x, self.y], list(checkpoint))
-        cosine = (180/math.pi) * math.acos((self.x - checkpoint[0])/d)
-        result = math.floor(cosine - abs(180 -self.angle))
-        self.relative = abs(result)
- 
-    # returns a target for the pod to move towards
-    def target(self, checkpoints):
-        targetx = checkpoints[self.checkid][0] - 2.5 * self.vx
-        targety = checkpoints[self.checkid][1] - 2.5 * self.vy
- 
-        if distance(checkpoints[self.checkid], [self.x, self.y]) <= 1000:
-            try:    
-                targetx = checkpoints[self.checkid+1][0] - 5 * self.vx
-                targety = checkpoints[self.checkid+1][1] - 5 * self.vy
+    # Outputs a target vector for the pod
+    def target(self):
+        checkpoint = self.path[self.targetid]
+        offset = (0, 0)
+        if distance(self.path[self.targetid], self.position) <= 3000:
+            try:
+                checkpoint = self.path[self.targetid+1]
             except IndexError:
-                targetx = checkpoints[0][0] - 2.5 * self.vx
-                targety = checkpoints[0][1] - 2.5 * self.vy
-        self.targets = [math.floor(targetx), math.floor(targety)]
+                checkpoint = self.path[0]
  
-    # returns whether to use a SHIELD or not
-    def shield(self):
-        self.thrust = "SHIELD"
+            t = [a-b for a, b in zip(self.path[self.targetid], self.position)]
+            try:
+                angle = (self.angler(self.path[self.targetid])%54)*(t[1]+t[0])/abs(t[0]+t[1])
+            except ZeroDivisionError:
+                angle = 0
+            velocity = [math.cos(math.radians(angle))*300, math.sin(math.radians(angle))*300]
+            position = [a+3*b for a, b in zip(self.position, velocity)]
+            dist = distance(position, self.path[self.targetid])
+            angle = self.angler(self.path[self.targetid])
+            if dist > 600 and (angle >= 90 or angle <= 270):
+                checkpoint = self.path[self.targetid]
+            offset = self.velocity
+        result = [a-b-2*c for a, b, c in zip(checkpoint, self.velocity, offset)]
+        return result
  
-    # returns which of the opponents pods the user chaser pod should intercept
-    def chase(self, opponents, checkpoints):
-        chaser = opponents[0]
-        if opponents[0].lap > opponents[1].lap:
-            return opponents[0]
-        elif opponents[0].lap < opponents[1].lap:
-            return opponents[1]
+    # Calculate the relative angle between a target and the pods' direction
+    def angler(self, target=None):
+        if target == None:
+            target = self.target()
+        angle = math.radians(self.angle)
+        uvec = (math.cos(angle), math.sin(angle))
+        pvec = [a-b for a, b in zip(target, self.position)]
+        dist = distance(self.position, target)
+        cosine = (uvec[0] * pvec[0] + uvec[1] * pvec[1]) / dist
+        return abs(math.floor(math.degrees(math.acos(cosine))))
+ 
+    # Outputs different values of thrust according to specific conditions
+    def thrust(self, epods, stuck=False):
+        dmax = 0
+        index = 0
+        thrust = 100
+        boost = False
+        for i in range(len(self.path)):
+            try:
+                if distance(self.path[i], self.path[i+1]) >= dmax:
+                    dmax = distance(self.path[i], self.path[i+1])
+                    index = i+1
+            except IndexError:
+                if distance(self.path[i], self.path[0]) >= dmax:
+                    dmax = distance(self.path[i], self.path[0])
+                    index = 0
+ 
+        if not self.boosted and self.targetid == index and self.angler() <= 3:
+            boost = True
+            self.boosted = True
         else:
-            if opponents[0].checkid == 0:
-                return opponents[0]
-            elif opponents[1].checkid == 0:
-                return opponents[1]
-            elif opponents[0].checkid > opponents[1].checkid:
-                return opponents[0]
-            elif opponents[0].checkid > opponents[1].checkid:
-                return opponents[1]
-            else:
-                for oppo in opponents.values():
-                    d = 100000000
-                    if distance([oppo.x, oppo.y], checkpoints[oppo.checkid]) < d:
-                        d = distance([oppo.x, oppo.y], checkpoints[oppo.checkid])
-                        chaser = oppo
-        return chaser
+            boost = False
  
-    # returns the number of laps elapsed for a pod
-    def calclap(self, lapped):
-        fin = lapped
-        if self.checkid == 1 and not fin:
-            fin = True
-            return [1, fin]
-        elif self.checkid > 2:
-            fin = False
-        return [0, fin]
-
-checkpoints = []
+        if self.angler() <= 90 or self.angler() >= 270:
+            allign = max(min((1 - self.angler()/90), 1), 0)
+            proximity = max(min(distance(self.path[self.targetid], self.position)/100, 1), 0)
+            thrust = math.floor(100 * allign * proximity)
+        else:
+            thrust = 0
+ 
+        thrust = 100 if stuck else thrust
+        
+        for pod in epods.values():
+            eposition = [a+b for a, b in zip(pod.position, pod.velocity)]
+            uposition = [a+b for a, b in zip(self.position, self.velocity)]
+            
+            angle = self.angler(pod.position) - self.angler()
+ 
+            if distance(uposition, eposition) <= 800 and (angle<90 or angle>270):
+                boost = False
+                thrust = "SHIELD"
+ 
+        return ["BOOST", self.boosted] if boost else [thrust, self.boosted]
+ 
+# Path class to track the position of each checkpoint
+class Path():
+    def __init__(self):
+        self.path = []
+    
+    def push(self, node):
+        self.path.append(node)
+ 
+    def get(self):
+        return self.path
+ 
+ 
+path = Path()
+upods = {}
+epods = {}
+boosted = [False, False]
 laps = int(input())
 checkpoint_count = int(input())
 for i in range(checkpoint_count):
     checkpoint_x, checkpoint_y = [int(j) for j in input().split()]
-    checkpoints.append((checkpoint_x, checkpoint_y))
-pods = {}
-opponents = {}
-laps = [0, 0]
-lapped = [False, False]
-
+    path.push(node=(checkpoint_x, checkpoint_y))
+ 
+# game loop
 while True:
     for i in range(2):
         x, y, vx, vy, angle, next_check_point_id = [int(j) for j in input().split()]
-        pods[i] = Pod(x=x, y=y, vx=vx, vy=vy, angle=angle, checkid=next_check_point_id)
-
+        upods[i] = Pod(position=(x, y), velocity=(vx, vy), angle=angle, targetid=next_check_point_id, path=path, boosted=boosted[i])
+        
     for i in range(2):
         x_2, y_2, vx_2, vy_2, angle_2, next_check_point_id_2 = [int(j) for j in input().split()]
-        opponents[i] = Pod(x=x_2, y=y_2, vx=vx_2, vy=vy_2, angle=angle_2, checkid=next_check_point_id_2)
-        
-        # updates the opponents pods laps
-        opponents[i].lap = laps[i]
+        epods[i] = Pod(position=(x_2, y_2), velocity=(vx_2, vy_2), angle=angle_2, targetid=next_check_point_id_2, path=path, boosted=0)
 
-    # determines which pod is the racer
-    pods[0].type = "racer"
-    pods[1].type = "interceptor"
- 
-    for i in opponents:
-
-        # updates the opponents laps for each pod
-        laps[i] += opponents[i].calclap(lapped[i])[0]
-        lapped[i] = opponents[i].calclap(lapped[i])[1]
- 
-    for pod in pods.values():
-        pod.relativeangle(checkpoints[pod.checkid])
-        pod.target(checkpoints)
-        if pod.type == "racer":
-            pod.thrust = thrust(checkpoints, pod.relative, pod.checkid, pod.x, pod.y, pod.thrust, pod.type)
-            print(f"{pod.targets[0]} {pod.targets[1]} {pod.thrust}")
-        elif pod.type == "interceptor":
-
-            # for the interceptor pod, returns the target as either a checkpoint or a enemy pod
-            pod.chaser = pod.chase(opponents, checkpoints)
-            pod.relativeangle([pod.chaser.x, pod.chaser.y])
-            pod.thrust = thrust(checkpoints, pod.relative, pod.chaser, pod.x, pod.y, pod.thrust, pod.type)
-            denemy = distance([pod.x, pod.y], [pod.chaser.x, pod.chaser.y])
-            dcheck = distance([pod.x, pod.y], checkpoints[pod.chaser.checkid])
-            if dcheck > denemy:
-                print(f"{pod.chaser.x} {pod.chaser.y} {pod.thrust}")
-            else:
-
-                # to move the pod move towards the opponents checkpoint and wait
-                pod.targetx = checkpoints[pod.chaser.checkid][0]
-                pod.targety = checkpoints[pod.chaser.checkid][1]
-                pod.relativeangle(checkpoints[pod.chaser.checkid])
-                pod.thrust = thrust(checkpoints, pod.relative, pod.chaser.checkid, pod.x, pod.y, pod.thrust, "pseudoracer")
-                print(f"{pod.targetx} {pod.targety} {pod.thrust}")
+    i=0
+    for pod in upods.values(): 
+        print(f"{pod.target()[0]} {pod.target()[1]} {pod.thrust(epods)[0]}")
+        boosted[i] = pod.thrust(epods)[1]
+        i += 1
